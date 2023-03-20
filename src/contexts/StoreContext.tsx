@@ -1,27 +1,34 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useLayoutEffect,
   useMemo,
   useState,
 } from "react";
 
+export type MyJSON =
+  | string
+  | number
+  | boolean
+  | null
+  | MyJSON[]
+  | { [key: string]: MyJSON };
+
 export class Store {
   public readonly availableStores: Record<string, Store>;
-  private states: Record<string, JSON | Record<string, JSON>>;
-  private listeners: Record<
-    string,
-    (value: JSON | Record<string, JSON>) => void
-  > = {};
+  private states: Record<string, MyJSON>;
+  private listeners: Record<string, Set<(value: MyJSON) => void>>;
 
   constructor(
     private id: string,
-    initialState?: Record<string, JSON | Record<string, JSON>>,
+    initialState?: Record<string, MyJSON>,
     _upperLayerStores?: Record<string, Store>
   ) {
     if (id === "__VACANT__") {
       this.availableStores = {};
       this.states = {};
+      this.listeners = {};
       return;
     }
     if (_upperLayerStores?.hasOwnProperty(id)) {
@@ -29,6 +36,10 @@ export class Store {
     }
     this.availableStores = { ..._upperLayerStores, [id]: this };
     this.states = { ...initialState };
+    this.listeners = Object.keys(initialState ?? {}).reduce((acc, key) => {
+      acc[key] = new Set();
+      return acc;
+    }, {} as Record<string, Set<(value: MyJSON) => void>>);
   }
 
   public getState(key: string) {
@@ -41,13 +52,22 @@ export class Store {
     return state;
   }
 
-  public setState(key: string, value: JSON | Record<string, JSON>) {
-    this.states[key] = value;
+  public setState(key: string, value: MyJSON | ((prev: MyJSON) => MyJSON)) {
+    const newValue =
+      typeof value === "function" ? value(this.states[key]) : value;
+    this.states[key] = newValue;
+
+    if (this.listeners[key] === undefined) {
+      this.listeners[key] = new Set();
+      return;
+    }
+
+    this.listeners[key].forEach((listener) => listener(newValue));
   }
 
   public addStateChangeListener(
     key: string,
-    listener: (value: JSON | Record<string, JSON>) => void
+    listener: (value: MyJSON) => void
   ) {
     const state = this.states[key];
 
@@ -55,17 +75,14 @@ export class Store {
       throw new Error(`State ${key} is not defined`);
     }
 
-    const listenerKey = `${this.id}__${key}__LISTENER__${listener.toString()}`;
-    this.listeners = { ...this.listeners, [listenerKey]: listener };
+    this.listeners[key].add(listener);
   }
 
   public removeStateChangeListener(
     key: string,
-    listener: (value: JSON | Record<string, JSON>) => void
+    listener: (value: MyJSON) => void
   ) {
-    const listenerKey = `${this.id}__${key}__LISTENER__${listener.toString()}`;
-    const { [listenerKey]: _, ...listeners } = this.listeners;
-    this.listeners = listeners;
+    this.listeners[key].delete(listener);
   }
 }
 
@@ -73,7 +90,7 @@ const storeContext = createContext<Store>(new Store("__VACANT__"));
 
 export const StoreProvider: React.FC<{
   id: string;
-  initialState?: Record<string, JSON | Record<string, JSON>>;
+  initialState?: Record<string, MyJSON>;
   children: React.ReactNode;
 }> = ({ id, initialState, children }) => {
   const upperLayerStores = useStore().availableStores;
@@ -92,8 +109,11 @@ export function useStore() {
 }
 
 export function useStoreState(storeID: string, key: string) {
-  const [state, setState] = useState<JSON | Record<string, JSON>>();
   const { availableStores } = useStore();
+  const store = availableStores[storeID];
+
+  const setter = useCallback((value: MyJSON) => store.setState(key, value), []);
+  const [state, setState] = useState<MyJSON>(store.getState(key));
 
   useLayoutEffect(() => {
     const store = availableStores[storeID];
@@ -107,5 +127,5 @@ export function useStoreState(storeID: string, key: string) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return [state, setState] as const;
+  return [state, setter] as const;
 }
